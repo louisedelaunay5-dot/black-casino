@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roulette Unlock — Hunt</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial;background:#071127;color:#e9f0fb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+  .card{background:#0f1724;padding:20px;border-radius:12px;width:520px;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+  h1{margin:0 0 8px 0}
+  .wheel{width:300px;height:300px;border-radius:50%;background:conic-gradient(#222, #111);margin:auto;display:flex;align-items:center;justify-content:center;transition:transform 3s cubic-bezier(.12,.78,.14,1)}
+  .marker{position:relative;top:-145px;width:0;height:0;border-left:12px solid transparent;border-right:12px solid transparent;border-bottom:20px solid #eab308}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:12px}
+  select,input[type=number]{padding:8px;border-radius:8px;border:none;background:#071227;color:inherit}
+  button{background:#eab308;color:#071227;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .small{font-size:13px;color:#94a3b8}
+  #resultBox{margin-top:12px;padding:10px;background:#081224;border-radius:8px}
+  pre{white-space:pre-wrap;word-wrap:break-word}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Roulette Unlock</h1>
+  <div class="small">Pick a number and color, then spin. If your bet matches the spin *and* the server spin is the secret target, you get the key.</div>
+
+  <div style="text-align:center; margin-top:12px">
+    <div class="wheel" id="wheel"><div id="wheelLabel">—</div></div>
+    <div class="marker"></div>
+  </div>
+
+  <div class="controls">
+    <input id="numInput" type="number" min="0" max="36" placeholder="0–36" style="width:120px">
+    <select id="colorInput">
+      <option value="red">Red</option>
+      <option value="black">Black</option>
+      <option value="green">Green (0)</option>
+    </select>
+    <button id="spinBtn">Spin</button>
+  </div>
+
+  <div id="resultBox" style="display:none">
+    <div id="status" class="small"></div>
+    <div style="margin-top:8px"><strong>Spin result:</strong> <span id="spinResult">—</span></div>
+    <div id="unlockArea" style="margin-top:8px"></div>
+    <div style="margin-top:8px" class="small">Commit: <span id="commitHash">loading…</span></div>
+    <div style="margin-top:8px" class="small">Verification (if unlocked): server seed is revealed — verify SHA256(seed) === commit.</div>
+  </div>
+</div>
+
+<script>
+const API_BASE = 'http://localhost:3000'; // change to your server
+
+async function fetchCommit(){
+  try {
+    const r = await fetch(API_BASE + '/commit');
+    const j = await r.json();
+    document.getElementById('commitHash').textContent = j.commit || 'N/A';
+  } catch (e) {
+    document.getElementById('commitHash').textContent = 'error';
+  }
+}
+fetchCommit();
+
+function secureNonce() {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return Array.from(a).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+function secureRandInt(max){ const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % max; }
+
+document.getElementById('spinBtn').addEventListener('click', async () => {
+  const numVal = document.getElementById('numInput').value;
+  const colorVal = document.getElementById('colorInput').value;
+  const n = numVal === '' ? null : Number(numVal);
+  if (n === null || Number.isNaN(n) || n < 0 || n > 36) { alert('Enter number 0–36'); return; }
+  const clientNonce = secureNonce();
+
+  // local wheel animation (purely cosmetic) — we animate to a pseudo-random position
+  const wheel = document.getElementById('wheel');
+  const sliceAngle = 360 / 37;
+  const idx = secureRandInt(37);
+  const deg = 6*360 + idx * sliceAngle + sliceAngle/2;
+  wheel.style.transform = `rotate(${deg}deg)`;
+  document.getElementById('wheelLabel').textContent = '…';
+
+  document.getElementById('resultBox').style.display = 'block';
+  document.getElementById('status').textContent = 'Spinning and contacting server…';
+  document.getElementById('unlockArea').innerHTML = '';
+  document.getElementById('spinResult').textContent = '—';
+
+  try {
+    const resp = await fetch(API_BASE + '/spin', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ clientNonce, betNumber: String(n), betColor: colorVal })
+    });
+    const data = await resp.json();
+    // display server spin result after animation ends
+    setTimeout(() => {
+      document.getElementById('wheelLabel').textContent = data.number;
+      document.getElementById('spinResult').textContent = `${data.number} / ${data.color}`;
+      document.getElementById('status').textContent = data.unlocked ? 'Unlocked!' : (data.playerBetMatchesSpin ? (data.isSecretHit ? 'Unlocked!' : 'Your bet matched the spin but this was not the secret target') : 'Your bet did not match the spin');
+      if (data.unlocked) {
+        // show password and verification info
+        document.getElementById('unlockArea').innerHTML = `<div style="margin-top:8px;background:#062223;padding:8px;border-radius:6px"><strong>Password:</strong> <code>${data.password}</code><br><small>Server seed revealed for verification: <code id="seedVal">${data.revealSeed}</code></small></div>`;
+        // show client-side verification: compute SHA256(revealSeed) and compare with commit
+        (async () => {
+          const enc = new TextEncoder();
+          const digest = await crypto.subtle.digest('SHA-256', enc.encode(data.revealSeed));
+          const arr = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+          const commitText = document.getElementById('commitHash').textContent;
+          const ok = (arr === commitText);
+          document.getElementById('unlockArea').innerHTML += `<div class="small" style="margin-top:6px">Commit verification: ${ok ? '✅ valid' : '❌ mismatch'}</div>`;
+        })();
+      } else {
+        if (data.hmac) {
+          document.getElementById('unlockArea').innerHTML = `<div class="small">Partial HMAC: <code>${data.hmac}</code></div>`;
+        }
+      }
+    }, 1300);
+  } catch (err) {
+    document.getElementById('status').textContent = 'Error contacting server';
+    console.error(err);
+  }
+});
+</script>
+</body>
+</html>
